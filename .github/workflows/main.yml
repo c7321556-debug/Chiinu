@@ -35,29 +35,33 @@ jobs:
         env:
           STATIC_PASS: ${{ secrets.RDP_STATIC_PASSWORD }}
         run: |
-          # --- FIX: Temporarily disable password complexity and minimum length enforcement ---
-          # This bypasses the Windows security policy that is causing the InvalidPasswordException.
-          Write-Host "Temporarily bypassing password complexity requirements..."
-          net accounts /minpwlen:0 /uniquepw:0
+          Write-Host "Attempting to create/update user 'RDP' with static password using net user..."
           
-          # Convert the secret string to a secure string
-          $securePass = ConvertTo-SecureString $env:STATIC_PASS -AsPlainText -Force
-          
-          # Check if the user already exists (for idempotent runs)
-          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
-              Write-Host "User 'RDP' already exists. Setting new password."
-              Set-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          # Check if user exists (net user returns exit code 0 if user exists, 2 if not)
+          # We check the exit code by piping output to Out-Null
+          net user RDP 2>&1 | Out-Null
+          $user_exists = $LASTEXITCODE -eq 0
+
+          if ($user_exists) {
+              Write-Host "User 'RDP' exists. Setting new password."
+              # Set password for existing user using net user
+              net user RDP $env:STATIC_PASS
           } else {
               Write-Host "Creating new user 'RDP'."
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+              # Create user and set password using net user
+              net user RDP $env:STATIC_PASS /add
           }
-
-          # Add user to Administrators and Remote Desktop Users groups
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          # Check for success
-          if (-not (Get-LocalUser -Name "RDP")) {
+          # Ensure account never expires and is active
+          net user RDP /expires:never /active:yes
+          
+          # Add user to Administrators and Remote Desktop Users groups using net localgroup
+          Write-Host "Adding 'RDP' user to necessary groups..."
+          net localgroup Administrators RDP /add
+          net localgroup "Remote Desktop Users" RDP /add
+          
+          # Check for final success
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               Write-Error "User creation or password reset failed"
               exit 1
           }
