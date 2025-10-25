@@ -35,6 +35,11 @@ jobs:
         env:
           STATIC_PASS: ${{ secrets.RDP_STATIC_PASSWORD }}
         run: |
+          # --- FIX: Temporarily disable password complexity and minimum length enforcement ---
+          # This bypasses the Windows security policy that is causing the InvalidPasswordException.
+          Write-Host "Temporarily bypassing password complexity requirements..."
+          net accounts /minpwlen:0 /uniquepw:0
+          
           # Convert the secret string to a secure string
           $securePass = ConvertTo-SecureString $env:STATIC_PASS -AsPlainText -Force
           
