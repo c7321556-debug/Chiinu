@@ -1,60 +1,59 @@
-
 name: RDP
 
 on:
+  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    # Set timeout for long-running connection (360 minutes = 6 hours)
+    timeout-minutes: 360
 
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # Enable Remote Desktop and disable Network Level Authentication (NLA)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
+          # Disable NLA for broader client compatibility (Value 0 means RDP is allowed without NLA)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
+          # Remove existing firewall rule and add a new one to allow RDP (port 3389)
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          
-          # For testing, allow any incoming connection on port 3389
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
+          # Restart the Remote Desktop service
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User with Secure Password
+      - name: Create RDP User with Static Password from Secret
+        # The 'RDP_STATIC_PASSWORD' secret must be created in your repository settings
+        env:
+          STATIC_PASS: ${{ secrets.RDP_STATIC_PASSWORD }}
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)      # A-Z
-              Lower   = [char[]](97..122)     # a-z
-              Number  = [char[]](48..57)      # 0-9
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126)) # Special characters
+          # Convert the secret string to a secure string
+          $securePass = ConvertTo-SecureString $env:STATIC_PASS -AsPlainText -Force
+          
+          # Check if the user already exists (for idempotent runs)
+          if (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue) {
+              Write-Host "User 'RDP' already exists. Setting new password."
+              Set-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+          } else {
+              Write-Host "Creating new user 'RDP'."
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
+
+          # Add user to Administrators and Remote Desktop Users groups
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-          
+          # Check for success
           if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
+              Write-Error "User creation or password reset failed"
               exit 1
           }
 
@@ -76,6 +75,7 @@ jobs:
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
+              Write-Host "Waiting for Tailscale IP... attempt $($retries + 1)"
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -85,13 +85,14 @@ jobs:
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
+          # Export IP for next step
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+          
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
+          # Test connectivity using Test-NetConnection
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -101,11 +102,11 @@ jobs:
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "`n=== RDP ACCESS INFORMATION ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "==================`n"
+          Write-Host "Password: (The password is the value stored in the RDP_STATIC_PASSWORD GitHub Secret)"
+          Write-Host "==============================`n"
           
           # Keep runner active indefinitely (or until manually cancelled)
           while ($true) {
